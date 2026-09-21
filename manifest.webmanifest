@@ -1,0 +1,16 @@
+{
+  "name": "Task notes",
+  "short_name": "Task notes",
+  "description": "Job notes for A&P work: description, AMM reference, sequence, checklists and photos.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F1F3F4",
+  "theme_color": "#17212B",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -110,6 +110,14 @@ textarea{display:block;resize:none;overflow:hidden}
 .ai{margin-top:24px;padding:10px 14px 16px;background:var(--card);border:2px solid var(--ink);border-radius:4px}
 .ai .sec-h{margin-bottom:2px}
 .msg{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;padding:6px 6px 6px 12px;background:var(--marker-soft);border-left:6px solid var(--ink);font-size:15px}
+.cardlist{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+.cardtile{position:relative;border:1.5px solid var(--ink);border-radius:4px;overflow:hidden;background:var(--card)}
+.cardtile .ph{aspect-ratio:3/4}
+.cardtag{position:absolute;left:6px;bottom:6px;padding:4px 7px 3px;background:var(--marker);border:2px solid var(--ink);border-radius:3px;font:700 14px/1 var(--display)}
+.cardx{position:absolute;top:6px;right:6px;display:flex;align-items:center;justify-content:center;width:40px;height:40px;background:var(--card);border:2px solid var(--ink);border-radius:4px}
+.cardx:disabled{opacity:.4}
+.cardbtns{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+.instr{min-height:140px}
 .err{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;padding:10px 12px;background:#fff;border:1.5px solid var(--tag);border-left-width:6px;border-radius:4px;color:var(--tag);font-size:15px}
 
 /* things to check */
@@ -223,8 +231,10 @@ const idb = (() => {
 })();
 const store = (typeof indexedDB !== 'undefined' && indexedDB) ? idb : null;
 const SETTINGS_KEY = 'ap-notes:settings';
-let settings = { apiKey: '', model: 'nvidia/nemotron-3-ultra-550b-a55b:free' };
-const MODELS = [['nvidia/nemotron-3-ultra-550b-a55b:free', 'Nemotron 3 Ultra (free)'], ['nvidia/nemotron-3-super-120b-a12b:free', 'Nemotron 3 Super (free, faster)']];
+let settings = { apiKey: '', model: 'nvidia/nemotron-3-ultra-550b-a55b:free', visionModel: 'nvidia/nemotron-3.5-super-vl:free', instructions: '' };
+const MODELS = [['nvidia/nemotron-3-ultra-550b-a55b:free', 'Nemotron 3 Ultra (free)'], ['nvidia/nemotron-3.5-lightning:free', 'Nemotron 3.5 Lightning (free, faster)']];
+/* Models that can read images, used whenever a task card photo is attached. */
+const VISION_MODELS = [['nvidia/nemotron-3.5-super-vl:free', 'Nemotron 3.5 Super VL (free)'], ['google/gemma-4-31b-it:free', 'Gemma 4 31B (free)'], ['google/gemma-4-26b-a4b-it:free', 'Gemma 4 26B (free, faster)']];
 const API_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const apiHeaders = k => ({ 'content-type': 'application/json', 'authorization': 'Bearer ' + k, 'HTTP-Referer': location.href, 'X-Title': 'A&P Task Notes' });
 
@@ -232,7 +242,7 @@ const apiHeaders = k => ({ 'content-type': 'application/json', 'authorization': 
 const SYSTEM = `You tidy rough notes from an aircraft maintenance technician (A&P, Boeing 787 work) into a structured task note. The technician does the real work from the current AMM (Aircraft Maintenance Manual). Your only job is to organise what they wrote.
 
 Hard rules:
-- Use ONLY information found in the rough notes or the existing note. Never invent or guess AMM task numbers, chapter references, part numbers, torque values, limits, tooling, fluid specifications, warnings or step content.
+- Use ONLY information found in the rough notes, the existing note, or the attached task card photo(s). Never invent or guess AMM task numbers, chapter references, part numbers, torque values, limits, tooling, fluid specifications, warnings or step content.
 - "refs": AMM references exactly as the technician wrote them. If they gave none, return [].
 - "sequence": short imperative steps, one action per step, in the order the technician described. Keep their wording; fix spelling and split run-on sentences. Do not add steps they did not mention.
 - "description": one to four plain sentences saying what the job is, based only on the notes. Use an empty string if the notes do not say.
@@ -240,8 +250,23 @@ Hard rules:
 - "verify": up to 4 short items the technician should look up in the current AMM, for example a missing task number, or a step where the notes give no value or limit. Say what to look up. Never supply the answer.
 - If the existing note already has content, keep all of it, add the new information from the rough notes, and keep existing step wording exactly.
 
+Task card photos (only when images are attached):
+- Read the printed task card carefully. Take the job title, AMM / task references and steps from the card, exactly as printed, in the card's order.
+- "card_text": a plain transcription of every piece of card text you used (title, task and AMM numbers, step text, values), exactly as printed. Use an empty string if no photo is attached.
+- If any part of the card is blurred, cut off or unreadable, do not guess. Add a "verify" item saying which part could not be read.
+- Handwritten additions on the card count too, but add a "verify" item if you are unsure of a handwritten word or number.
+
 Reply with ONLY a JSON object, no markdown fences and no other text:
-{"title": string, "description": string, "refs": string[], "sequence": string[], "verify": string[]}`;
+{"title": string, "description": string, "refs": string[], "sequence": string[], "verify": string[], "card_text": string}`;
+const buildSystem = () => {
+  const extra = settings.instructions.trim();
+  return extra ? SYSTEM + `
+
+Custom instructions from the technician. Follow them for wording, style, layout and what to include. The hard rules above always win: never invent AMM data, values or steps, even if these instructions ask for it.
+"""
+${extra}
+"""` : SYSTEM;
+};
 
 /* ---------- state ---------- */
 let jobs = [];
@@ -265,6 +290,10 @@ let prefs = { folders: [], status: 'all', folder: '', area: '', aircraft: '', fr
 let filtersOpen = false, folderAdding = false, delFolderArmed = '', delFolderTimer = null;
 let photoBusy = false, photoError = '', viewerId = null, phArmed = false, clArmed = null, clTimer = null;
 const imgCache = {}, pendingImg = {};
+const cardImgs = {};          // jobId -> [{ id, url }] task card photos waiting for the AI
+let cardBusy = false;
+const pendingCards = j => cardImgs[j.id] || [];
+const canRunAI = j => !aiBusyId && !cardBusy && !!(j.rough.trim() || pendingCards(j).length);
 const imgKey = id => 'ap-notes:img:' + id;
 
 const app = document.getElementById('app');
@@ -659,16 +688,18 @@ function aiPanel(j) {
     !aiOpen ? el('button', { class: 'link', onClick: () => { aiOpen = true; redraw(); } }, 'Add more')
             : (hasContent(j) && !busy ? el('button', { class: 'link', onClick: () => { aiOpen = false; redraw(); } }, 'Hide') : null)));
   if (aiOpen) {
-    sec.append(
-      el('p', { class: 'hint' }, "Type or dictate the job in your own words: what it is, the AMM task number, and the order you'll do it in."),
+    sec.append(el('div', {},
+      el('p', { class: 'hint' }, "Snap the task card, type or dictate the job in your own words, or both. The AI fills the note from what it can read and what you write."),
       el('textarea', {
         class: 'in auto', id: 'rough', rows: '4', 'aria-label': 'Rough notes', value: j.rough,
         placeholder: 'e.g. Replace the sensor on the left main gear. AMM task number as printed in the manual. First safety the aircraft, then remove the wheel, then swap the sensor, then test.',
-        onInput: e => { j.rough = e.target.value; j.updated = Date.now(); queueSave(); autosize(e.target); const b = $('aibtn'); if (b) b.disabled = !!aiBusyId || !j.rough.trim(); }
+        onInput: e => { j.rough = e.target.value; j.updated = Date.now(); queueSave(); autosize(e.target); const b = $('aibtn'); if (b) b.disabled = !canRunAI(j); }
       }),
-      el('button', { class: 'btn solid wide', id: 'aibtn', style: 'margin-top:10px', disabled: !!aiBusyId || !j.rough.trim(), onClick: runAI }, busy ? 'Writing up…' : 'Write up with AI'),
+      cardBlock(j),
+      el('button', { class: 'btn solid wide', id: 'aibtn', style: 'margin-top:10px', disabled: !canRunAI(j), onClick: runAI }, busy ? (pendingCards(j).length ? 'Reading task card…' : 'Writing up…') : 'Write up with AI'),
+      settings.instructions.trim() ? el('p', { class: 'fine' }, 'Your custom instructions are applied. ', el('button', { class: 'link', style: 'min-height:0;font-size:13px', onClick: openSettings }, 'Edit')) : null,
       el('p', { class: 'fine' }, 'The AI is told to use only what you write, and the app flags numbers it cannot find in your notes. The current AMM is always the authority.'),
-      !settings.apiKey ? el('div', { class: 'msg' }, el('span', {}, 'The AI write-up needs your OpenRouter API key.'), el('button', { class: 'link', onClick: openSettings }, 'Open settings')) : null);
+      !settings.apiKey ? el('div', { class: 'msg' }, el('span', {}, 'The AI write-up needs your OpenRouter API key.'), el('button', { class: 'link', onClick: openSettings }, 'Open settings')) : null));
   }
   if (aiMsg && undo && undo.id === j.id) {
     sec.append(el('div', { id: 'aimsg', class: 'msg', 'aria-live': 'polite' },
@@ -677,6 +708,35 @@ function aiPanel(j) {
   }
   if (aiError) sec.append(el('div', { class: 'err', role: 'alert' }, el('span', {}, aiError), aiErrSettings ? el('button', { class: 'link', onClick: openSettings }, 'Open settings') : null));
   return sec;
+}
+
+function cardBlock(j) {
+  const cards = pendingCards(j);
+  const locked = !!aiBusyId || cardBusy;
+  const picker = (label, extra) => el('label', { class: 'btn' + (locked ? ' off' : '') }, label,
+    el('input', Object.assign({ type: 'file', accept: 'image/*', class: 'sr', disabled: locked, onChange: e => { const f = [...e.target.files]; e.target.value = ''; addCards(j.id, f); } }, extra)));
+  return el('div', {},
+    cards.length ? el('ul', { class: 'cardlist', 'aria-label': 'Task card photos for the AI' }, cards.map((c, i) =>
+      el('li', { class: 'cardtile' },
+        el('img', { class: 'ph', src: c.url, alt: 'Task card photo ' + (i + 1) }),
+        el('span', { class: 'cardtag' }, 'Card ' + (i + 1)),
+        el('button', { class: 'cardx', 'aria-label': 'Remove task card photo ' + (i + 1), disabled: locked, onClick: () => { cardImgs[j.id] = cards.filter(x => x.id !== c.id); redraw(); } }, icon('x'))))) : null,
+    el('div', { class: 'cardbtns' },
+      picker(cardBusy ? 'Adding…' : (cards.length ? 'Next page' : 'Snap card'), { capture: 'environment' }),
+      picker('From photos', { multiple: '' })),
+    cards.length ? el('p', { class: 'fine' }, 'Lay the card flat, in good light, with the whole page in frame. After the write-up the card is saved to this note\u2019s Photos.') : null);
+}
+async function addCards(id, files) {
+  if (!files.length) return;
+  cardBusy = true; aiError = ''; redraw();
+  let failed = 0;
+  for (const f of files) {
+    try { (cardImgs[id] = cardImgs[id] || []).push({ id: uid(), url: await shrink(f, 2000, 0.85) }); }
+    catch (e) { failed++; }
+  }
+  cardBusy = false;
+  if (failed) aiError = failed + (failed > 1 ? ' photos' : ' photo') + " couldn't be read. Check the file is an image, then try again.";
+  if (view === 'edit' && currentId === id) redraw();
 }
 
 function flagsBox(j) {
@@ -1197,20 +1257,25 @@ function unknownNumbers(inText, outText) {
   }
   return odd.slice(0, 6);
 }
-async function callAI(job, roughText) {
+async function callAI(job, roughText, cardUrls) {
   if (!settings.apiKey) throw new Error('nokey');
   const existing = { title: job.title, description: job.description, refs: job.refs, sequence: job.steps.map(s => s.text) };
+  const prompt = 'Existing note:\n' + JSON.stringify(existing) + '\n\nRough notes:\n' + (roughText || '(none)') +
+    (cardUrls.length ? '\n\n' + cardUrls.length + ' task card photo' + (cardUrls.length > 1 ? 's are' : ' is') + ' attached, in page order.' : '');
+  const content = cardUrls.length
+    ? [{ type: 'text', text: prompt }, ...cardUrls.map(url => ({ type: 'image_url', image_url: { url } }))]
+    : prompt;
   const res = await fetch(API_URL, {
     method: 'POST',
     headers: apiHeaders(settings.apiKey),
     body: JSON.stringify({
-      model: settings.model,
+      model: cardUrls.length ? settings.visionModel : settings.model,
       messages: [
-        { role: 'system', content: SYSTEM },
-        { role: 'user', content: 'Existing note:\n' + JSON.stringify(existing) + '\n\nRough notes:\n' + roughText }
+        { role: 'system', content: buildSystem() },
+        { role: 'user', content }
       ],
-      temperature: 0.3,
-      max_tokens: 1500
+      temperature: 0.2,
+      max_tokens: cardUrls.length ? 3000 : 1500
     })
   });
   if (res.status === 401 || res.status === 403) throw new Error('auth');
@@ -1222,7 +1287,8 @@ async function callAI(job, roughText) {
   try { return JSON.parse(text.slice(a, b + 1)); } catch (e) { throw new Error('parse'); }
 }
 function applyAI(job, out, roughText) {
-  const inText = [roughText, job.title, job.description, job.refs.join(' '), job.steps.map(s => s.text).join(' ')].join(' ');
+  const cardText = typeof out.card_text === 'string' ? out.card_text : '';
+  const inText = [roughText, cardText, job.title, job.description, job.refs.join(' '), job.steps.map(s => s.text).join(' ')].join(' ');
   const list = a => Array.isArray(a) ? a.map(x => String(x).trim()).filter(Boolean) : [];
   if (!job.title.trim() && out.title) job.title = String(out.title).trim().slice(0, 120);
   if (typeof out.description === 'string' && out.description.trim()) job.description = out.description.trim();
@@ -1248,21 +1314,31 @@ function applyAI(job, out, roughText) {
 }
 async function runAI() {
   const j = cur();
-  if (!j || aiBusyId || !j.rough.trim()) return;
-  const id = j.id, roughText = j.rough.trim();
+  if (!j || !canRunAI(j)) return;
+  const id = j.id, roughText = j.rough.trim(), cards = pendingCards(j).slice();
   aiBusyId = id; aiError = ''; aiErrSettings = false; aiMsg = '';
   redraw();
   try {
-    const out = await callAI(j, roughText);
+    const out = await callAI(j, roughText, cards.map(c => c.url));
     const job = jobs.find(x => x.id === id);
     if (job) {
       const snapshot = JSON.stringify(job);
       applyAI(job, out, roughText);
       job.rough = '';
+      const saved = [];
+      for (const c of cards) {
+        try {
+          if (store) await store.set(imgKey(c.id), c.url, false);
+          imgCache[c.id] = c.url;
+          job.photos.push({ id: c.id, caption: 'Task card' + (cards.length > 1 ? ' p' + (saved.length + 1) : '') });
+          saved.push(c);
+        } catch (e) { /* keep the write-up even if a card image can't be stored */ }
+      }
+      delete cardImgs[id];
       touch(job);
       if (view === 'edit' && currentId === id) {
-        undo = { id, snapshot };
-        aiMsg = 'Written up from your notes. Check every line against the AMM.';
+        undo = { id, snapshot, cards: saved };
+        aiMsg = (cards.length ? 'Filled from the task card' + (roughText ? ' and your notes' : '') : 'Written up from your notes') + '. Check every line against the AMM.';
         aiOpen = false;
       }
     }
@@ -1272,6 +1348,7 @@ async function runAI() {
     aiError = m === 'nokey' ? 'Add your OpenRouter API key in Settings to use the AI write-up. Create one free at openrouter.ai.'
       : m === 'auth' ? 'OpenRouter rejected your API key. Check it in Settings.'
       : m === 'parse' ? "The AI's reply couldn't be read. Tap Write up with AI to try again, or fill the fields in by hand."
+      : String(m || '').startsWith('http') && cards.length ? "OpenRouter returned an error (" + String(m).slice(5) + ") reading the task card. Try again, or pick another Photo model in Settings. Your card and notes are still here."
       : String(m || '').startsWith('http') ? "OpenRouter returned an error (" + String(m).slice(5) + "). Try again in a moment. Your rough notes are still in the box."
       : "Couldn't reach the AI. You may be offline. Your rough notes are still in the box.";
   }
@@ -1282,6 +1359,10 @@ function undoAI() {
   if (!undo) return;
   const i = jobs.findIndex(x => x.id === undo.id);
   if (i >= 0) jobs[i] = normalize(JSON.parse(undo.snapshot));
+  if (undo.cards && undo.cards.length) {
+    dropPhotoData(undo.cards.map(c => c.id));
+    cardImgs[undo.id] = undo.cards;
+  }
   undo = null; aiMsg = ''; aiOpen = true;
   queueSave(); redraw();
 }
@@ -1294,7 +1375,12 @@ async function loadSettings() {
   try {
     const r = await store.get(SETTINGS_KEY, false);
     const v = JSON.parse(r.value);
-    if (v && typeof v === 'object') settings = { apiKey: String(v.apiKey || ''), model: MODELS.some(m => m[0] === v.model) ? v.model : settings.model };
+    if (v && typeof v === 'object') settings = {
+      apiKey: String(v.apiKey || ''),
+      model: MODELS.some(m => m[0] === v.model) ? v.model : settings.model,
+      visionModel: VISION_MODELS.some(m => m[0] === v.visionModel) ? v.visionModel : settings.visionModel,
+      instructions: String(v.instructions || '')
+    };
   } catch (e) { /* defaults */ }
 }
 async function saveSettings() { if (store) { try { await store.set(SETTINGS_KEY, JSON.stringify(settings), false); } catch (e) { /* ignore */ } } }
@@ -1349,6 +1435,11 @@ async function showStorage() {
   } catch (e) { /* keep basic text */ }
   setMsg('storeinfo', text);
 }
+const INSTR_EXAMPLE = `- Write steps as short imperative phrases, one action each.
+- Keep the task card's step numbering and sub-step letters.
+- Put any WARNING or CAUTION from the card as its own step, starting with "WARNING:" or "CAUTION:".
+- Keep the description to two sentences.
+- Use British spelling.`;
 function settingsView() {
   const root = el('div', { class: 'app' });
   root.append(el('header', { class: 'bar' },
@@ -1358,6 +1449,12 @@ function settingsView() {
   const model = el('select', { class: 'in sel', id: 'modelsel', 'aria-label': 'AI model', onChange: e => { settings.model = e.target.value; saveSettings(); setMsg('msg-ai', 'Model saved.'); } },
     MODELS.map(m => el('option', { value: m[0] }, m[1])));
   model.value = settings.model;
+  const vmodel = el('select', { class: 'in sel', id: 'vmodelsel', onChange: e => { settings.visionModel = e.target.value; saveSettings(); setMsg('msg-ai', 'Photo model saved.'); } },
+    VISION_MODELS.map(m => el('option', { value: m[0] }, m[1])));
+  vmodel.value = settings.visionModel;
+  const instr = el('textarea', { class: 'in auto instr', id: 'instrin', rows: '6', 'aria-label': 'Custom instructions for the AI', value: settings.instructions,
+    placeholder: 'e.g. Write steps in short UPPERCASE phrases. Always start with safety steps the card lists. Call the aircraft by its tail number.',
+    onInput: e => { autosize(e.target); setMsg('msg-ins', ''); } });
   root.append(el('main', { class: 'page' },
     el('section', { class: 'sec', style: 'margin-top:8px;border-top:0;padding-top:0' },
       el('div', { class: 'sec-h' }, el('h2', {}, 'AI write-up')),
@@ -1374,8 +1471,18 @@ function settingsView() {
         } }, 'Save key'),
         el('button', { class: 'btn', onClick: testKey }, 'Test key')),
       settings.apiKey ? el('button', { class: 'link', style: 'margin-top:6px', onClick: async () => { settings.apiKey = ''; await saveSettings(); redraw(); setMsg('msg-ai', 'Key removed.'); } }, 'Remove saved key') : null,
-      el('label', { class: 'lab' }, 'Model'), model,
+      el('label', { class: 'lab', for: 'modelsel' }, 'Model for typed notes'), model,
+      el('label', { class: 'lab', for: 'vmodelsel' }, 'Photo model (reads task cards)'), vmodel,
+      el('p', { class: 'fine' }, 'Used only when a task card photo is attached. If one model misreads your cards, try another.'),
       el('p', { class: 'setmsg', id: 'msg-ai', role: 'status', 'aria-live': 'polite' })),
+    el('section', { class: 'sec' },
+      el('div', { class: 'sec-h' }, el('h2', {}, 'Custom instructions')),
+      el('p', { class: 'hint' }, 'Tell the AI how you like your notes written. It follows these every time, but it will still never invent AMM numbers, values or steps.'),
+      instr,
+      el('div', { class: 'pair' },
+        el('button', { class: 'btn solid', onClick: async () => { settings.instructions = instr.value; await saveSettings(); setMsg('msg-ins', settings.instructions.trim() ? 'Instructions saved.' : 'Instructions cleared.'); } }, 'Save'),
+        el('button', { class: 'btn', onClick: () => { instr.value = INSTR_EXAMPLE; autosize(instr); instr.focus(); setMsg('msg-ins', 'Example added. Edit it, then save.'); } }, 'Use example')),
+      el('p', { class: 'setmsg', id: 'msg-ins', role: 'status', 'aria-live': 'polite' })),
     el('section', { class: 'sec' },
       el('div', { class: 'sec-h' }, el('h2', {}, 'Backup')),
       el('p', { class: 'hint' }, "Notes and photos stay on this device and don't sync. Download a backup now and then, and before you change phones or clear browser data."),

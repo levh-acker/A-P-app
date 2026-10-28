@@ -1,5 +1,5 @@
 // Keeps the app available offline. Bump CACHE when index.html changes.
-const CACHE = 'task-notes-v3';
+const CACHE = 'task-notes-v4';
 const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', e => {
